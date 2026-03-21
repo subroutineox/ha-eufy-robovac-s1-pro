@@ -103,6 +103,22 @@ Please report bugs and feature requests via [Issues](https://github.com/tkoba197
 
 Pull requests are welcome!
 
+## Changelog
+
+### v1.0.3
+- **Fix: Eufy API login failure** — Updated login headers (`User-Agent`, `clientType`, `client_secret` key name) to match the latest Eufy Home app (v3.1.3). Added v1/v2 endpoint fallback to handle potential future API endpoint deprecation.
+- **Fix: Entity states showing "unavailable" / "unknown" after restart** — Added `RestoreEntity` support to Running Status, Cleaning Mode, Total Cleaning Count, and Total Cleaning Area entities. These now retain their last known values across Home Assistant restarts until live DPS data becomes available.
+- **Cleanup: Remove verbose debug logging** — Removed DPS discovery and update debug logs from `coordinators.py` that were cluttering the log output.
+
+### v1.0.2
+- Improve Running Status Sensor to indicate more detailed status
+
+### v1.0.1
+- Fix status indication and improve varying Total Cleaning Area
+
+### v1.0.0
+- Initial release
+
 ## Credits
 
 This project is based on:

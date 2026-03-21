@@ -28,14 +28,6 @@ class EufyTuyaDataUpdateCoordinator(DataUpdateCoordinator):
 
         if changed:
             existing_dps.update(new_dps)
-            
-            # Debug logging for DPS discovery
-            logger.info("=== Eufy Robovac DPS Debug ===")
-            logger.info("Device ID: %s", self.tuya_client.device_id)
-            logger.info("Available DPS IDs and values:")
-            for dps_id, value in existing_dps.items():
-                logger.info("  DPS %s: %s (type: %s)", dps_id, value, type(value).__name__)
-            logger.info("=== End DPS Debug ===")
 
             if async_set_updated_data_upon_change:
                 # only do this if there were changes as to not spam the state machine
@@ -51,15 +43,6 @@ class EufyTuyaDataUpdateCoordinator(DataUpdateCoordinator):
         # which will in turn call handle_tuya_message and may cause an extra update to the state machine
         # TODO: this all needs to be cleaned up
         dps = dict((await self.tuya_client.async_get()) or {})
-
-        # Initial DPS discovery logging
-        if dps and not self.data:
-            logger.info("=== Initial Eufy Robovac DPS Discovery ===")
-            logger.info("Device ID: %s", self.tuya_client.device_id)
-            logger.info("Total DPS found: %d", len(dps))
-            for dps_id, value in sorted(dps.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
-                logger.info("  DPS %s: %s (type: %s)", dps_id, value, type(value).__name__)
-            logger.info("=== End Initial Discovery ===")
 
         return self.handle_new_dps(
             dps,

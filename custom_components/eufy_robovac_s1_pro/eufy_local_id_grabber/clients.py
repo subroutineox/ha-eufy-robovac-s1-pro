@@ -96,26 +96,57 @@ class EufyHomeSession:
         return urljoin(self.base_url, path)
 
     def login(self, email, password):
-        resp = self.session.post(
-            self.url("user/email/login"),
-            json={
-                "client_Secret": EUFY_CLIENT_SECRET,
-                "client_id": EUFY_CLIENT_ID,
-                "email": email,
-                "password": password,
-            },
+        login_headers = {
+            "category": "Home",
+            "Accept": "*/*",
+            "Content-Type": "application/json",
+            "clientType": "1",
+            "language": LANGUAGE,
+            "User-Agent": "EufyHome-Android-3.1.3-753",
+            "timezone": TIMEZONE,
+            "country": "US",
+            "openudid": PLATFORM,
+            "Connection": "keep-alive",
+        }
+        login_payload = {
+            "client_id": EUFY_CLIENT_ID,
+            "client_secret": EUFY_CLIENT_SECRET,
+            "email": email,
+            "password": password,
+        }
+
+        # Try v1 first, then v2
+        login_paths = ["user/email/login", "user/v2/email/login"]
+        attempt_results = []
+
+        for path in login_paths:
+            try:
+                resp = self.session.post(
+                    self.url(path),
+                    json=login_payload,
+                    headers=login_headers,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+                if isinstance(data, dict) and "access_token" in data:
+                    access_token = data["access_token"]
+                    user_id = data["user_info"]["id"]
+                    new_base_url = data["user_info"]["request_host"]
+
+                    self.session.headers["uid"] = user_id
+                    self.session.headers["token"] = access_token
+                    self.base_url = new_base_url
+                    return
+
+                attempt_results.append(f"{path}: HTTP {resp.status_code}, body={resp.text[:200]}")
+            except Exception as e:
+                attempt_results.append(f"{path}: Exception: {e}")
+
+        raise Exception(
+            f"Eufy API login failed on all endpoints. "
+            f"Attempts: {'; '.join(attempt_results)}"
         )
-
-        resp.raise_for_status()
-        data = resp.json()
-
-        access_token = data["access_token"]
-        user_id = data["user_info"]["id"]
-        new_base_url = data["user_info"]["request_host"]
-
-        self.session.headers["uid"] = user_id
-        self.session.headers["token"] = access_token
-        self.base_url = new_base_url
 
     def _request(self, *args, **kwargs):
         if not self.session.headers["token"] or not self.session.headers["uid"]:

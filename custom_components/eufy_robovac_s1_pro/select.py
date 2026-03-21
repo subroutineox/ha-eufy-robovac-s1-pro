@@ -8,6 +8,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import CONF_COORDINATOR, CONF_DISCOVERED_DEVICES, DOMAIN
@@ -64,8 +65,11 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class CleaningModeSelect(CoordinatorEntity, SelectEntity):
-    """Select entity for cleaning mode."""
+class CleaningModeSelect(CoordinatorEntity, RestoreEntity, SelectEntity):
+    """Select entity for cleaning mode.
+    
+    RestoreEntity を使用して再起動後もDPSが読めるまで最終値を保持します。
+    """
 
     _attr_name = "Cleaning Mode"
     _attr_icon = "mdi:broom"
@@ -75,6 +79,18 @@ class CleaningModeSelect(CoordinatorEntity, SelectEntity):
         """Initialize the select entity."""
         super().__init__(coordinator)
         self._attr_unique_id = f"{coordinator.tuya_client.device_id}_cleaning_mode"
+        self._restored_option = None
+    
+    async def async_added_to_hass(self) -> None:
+        """Restore last known value on startup."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state and last_state.state not in (None, "unknown", "unavailable"):
+            # Validate that restored value is a known option
+            valid_options = [CLEANING_MODES[m]["name"] for m in CLEANING_MODES]
+            if last_state.state in valid_options:
+                self._restored_option = last_state.state
+                logger.debug("Restored Cleaning Mode: %s", self._restored_option)
         
     @property
     def device_info(self) -> DeviceInfo:
@@ -95,7 +111,7 @@ class CleaningModeSelect(CoordinatorEntity, SelectEntity):
     def current_option(self) -> str | None:
         """Return the currently selected option."""
         if not self.coordinator.data:
-            return None
+            return self._restored_option
         
         dps154 = self.coordinator.data.get("154", "")
         dps10 = self.coordinator.data.get("10", None)

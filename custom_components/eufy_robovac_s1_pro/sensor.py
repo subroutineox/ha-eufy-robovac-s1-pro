@@ -5,6 +5,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.icon import icon_for_battery_level
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 import base64
 import logging
@@ -231,36 +232,39 @@ class BatteryPercentageSensor(CoordinatorTuyaDeviceUniqueIDMixin, CoordinatorEnt
 
 
 
-class RunningStatusSensor(CoordinatorTuyaDeviceUniqueIDMixin, CoordinatorEntity, SensorEntity):
+class RunningStatusSensor(CoordinatorTuyaDeviceUniqueIDMixin, CoordinatorEntity, RestoreEntity, SensorEntity):
     """Sensor that shows detailed running status based on DPS 153.
     
-    SUBSTATUS_DESCRIPTIONSで定義されている詳細な状態を表示します：
-    - Cleaning: 掃除中
-    - Paused: 一時停止中
-    - Returning to Dock: ドックに帰還中
-    - Charging: 充電中
-    - Fully Charged: 満充電
-    - Collecting Dust: ごみ収集中
-    - Refilling Water: 給水中
-    - Washing Mop: モップ洗浄中
-    - Drying Mop: モップ乾燥中
-    - など
+    RestoreEntity を使用して再起動後もDPSが読めるまで最終値を保持します。
     """
     
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_name = "Running Status"
     _attr_icon = "mdi:robot-vacuum"
     
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._restored_value = None
+    
+    async def async_added_to_hass(self) -> None:
+        """Restore last known value on startup."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state and last_state.state not in (None, "unknown", "unavailable"):
+            self._restored_value = last_state.state
+            _LOGGER.debug("Restored Running Status: %s", self._restored_value)
+    
     @property
     def available(self) -> bool:
-        """Return if entity is available."""
-        return self.coordinator.data is not None and ("153" in self.coordinator.data or "2" in self.coordinator.data)
+        """Available if we have live data or a restored value."""
+        has_live = self.coordinator.data is not None and ("153" in self.coordinator.data or "2" in self.coordinator.data)
+        return has_live or self._restored_value is not None
     
     @property
     def native_value(self) -> str:
         """Return the detailed running status based on DPS 153."""
         if not self.coordinator.data:
-            return "Unknown"
+            return self._restored_value or "Unknown"
         
         # Check DPS 153 first (most reliable for S1 Pro)
         dps153 = self.coordinator.data.get("153", "")
@@ -326,8 +330,11 @@ class RunningStatusSensor(CoordinatorTuyaDeviceUniqueIDMixin, CoordinatorEntity,
         return "mdi:robot-vacuum"
 
 
-class TotalCleaningCountSensor(CoordinatorTuyaDeviceUniqueIDMixin, CoordinatorEntity, SensorEntity):
-    """Sensor for total number of cleaning sessions from DPS 167."""
+class TotalCleaningCountSensor(CoordinatorTuyaDeviceUniqueIDMixin, CoordinatorEntity, RestoreEntity, SensorEntity):
+    """Sensor for total number of cleaning sessions from DPS 167.
+    
+    累積値のため RestoreEntity を使用して再起動後も最終値を保持します。
+    """
     
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_name = "Total Cleaning Count"
@@ -336,19 +343,30 @@ class TotalCleaningCountSensor(CoordinatorTuyaDeviceUniqueIDMixin, CoordinatorEn
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._last_valid_count = None  # 前回の有効な値を保持
+        self._last_valid_count = None
+    
+    async def async_added_to_hass(self) -> None:
+        """Restore last known value on startup."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state and last_state.state not in (None, "unknown", "unavailable"):
+            try:
+                self._last_valid_count = int(last_state.state)
+                _LOGGER.debug(
+                    "Restored Total Cleaning Count: %s", self._last_valid_count
+                )
+            except (ValueError, TypeError):
+                pass
     
     @property
     def available(self) -> bool:
-        """Return if entity is available."""
-        return self.coordinator.data is not None and "167" in self.coordinator.data
+        """Available if we have live data or a restored value."""
+        has_live = self.coordinator.data is not None and "167" in self.coordinator.data
+        return has_live or self._last_valid_count is not None
     
     @property
     def native_value(self) -> int | None:
-        """Return the total cleaning count.
-        
-        累積値なので、前回の値より小さい値は無視して前回の値を保持します。
-        """
+        """Return the total cleaning count."""
         if not self.coordinator.data:
             return self._last_valid_count
         
@@ -359,25 +377,21 @@ class TotalCleaningCountSensor(CoordinatorTuyaDeviceUniqueIDMixin, CoordinatorEn
         stats = parse_dps167_statistics(dps167)
         new_count = stats.get("total_count")
         
-        # 新しい値が取得できない場合は前回の値を返す
         if new_count is None:
             return self._last_valid_count
         
-        # 初回または新しい値が前回の値以上の場合のみ更新
         if self._last_valid_count is None or new_count >= self._last_valid_count:
             self._last_valid_count = new_count
             return new_count
         else:
-            # 新しい値が前回より小さい場合は無視して前回の値を保持
-            _LOGGER.debug(
-                f"Total Cleaning Count: Ignoring decreased value {new_count} "
-                f"(previous: {self._last_valid_count})"
-            )
             return self._last_valid_count
 
 
-class TotalCleaningAreaSensor(CoordinatorTuyaDeviceUniqueIDMixin, CoordinatorEntity, SensorEntity):
-    """Sensor for total cleaned area from DPS 167."""
+class TotalCleaningAreaSensor(CoordinatorTuyaDeviceUniqueIDMixin, CoordinatorEntity, RestoreEntity, SensorEntity):
+    """Sensor for total cleaned area from DPS 167.
+    
+    累積値のため RestoreEntity を使用して再起動後も最終値を保持します。
+    """
     
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_name = "Total Cleaning Area"
@@ -387,21 +401,30 @@ class TotalCleaningAreaSensor(CoordinatorTuyaDeviceUniqueIDMixin, CoordinatorEnt
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._last_valid_area = None  # 前回の有効な値を保持
+        self._last_valid_area = None
+    
+    async def async_added_to_hass(self) -> None:
+        """Restore last known value on startup."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state and last_state.state not in (None, "unknown", "unavailable"):
+            try:
+                self._last_valid_area = int(last_state.state)
+                _LOGGER.debug(
+                    "Restored Total Cleaning Area: %s m²", self._last_valid_area
+                )
+            except (ValueError, TypeError):
+                pass
     
     @property
     def available(self) -> bool:
-        """Return if entity is available."""
-        return self.coordinator.data is not None and "167" in self.coordinator.data
+        """Available if we have live data or a restored value."""
+        has_live = self.coordinator.data is not None and "167" in self.coordinator.data
+        return has_live or self._last_valid_area is not None
     
     @property
     def native_value(self) -> int | None:
-        """Return the total cleaning area in square meters.
-        
-        累積値なので、前回の値より小さい値は無視して前回の値を保持します。
-        これにより、掃除開始直後に一時的に表示される誤った値（24m²など）を
-        フィルタリングできます。
-        """
+        """Return the total cleaning area in square meters."""
         if not self.coordinator.data:
             return self._last_valid_area
         
@@ -412,20 +435,13 @@ class TotalCleaningAreaSensor(CoordinatorTuyaDeviceUniqueIDMixin, CoordinatorEnt
         stats = parse_dps167_statistics(dps167)
         new_area = stats.get("total_area")
         
-        # 新しい値が取得できない場合は前回の値を返す
         if new_area is None:
             return self._last_valid_area
         
-        # 初回または新しい値が前回の値以上の場合のみ更新
         if self._last_valid_area is None or new_area >= self._last_valid_area:
             self._last_valid_area = new_area
             return new_area
         else:
-            # 新しい値が前回より小さい場合は無視して前回の値を保持
-            _LOGGER.debug(
-                f"Total Cleaning Area: Ignoring decreased value {new_area}m² "
-                f"(previous: {self._last_valid_area}m²)"
-            )
             return self._last_valid_area
 
 
