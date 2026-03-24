@@ -10,7 +10,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_COORDINATOR, CONF_DISCOVERED_DEVICES, DOMAIN, PLATFORMS
+from .const import CONF_COORDINATOR, CONF_DISCOVERED_DEVICES, DOMAIN, PLATFORMS, CONF_IP_ADDRESS
 from .coordinators import EufyTuyaDataUpdateCoordinator
 from .discovery import discover
 from .eufy_local_id_grabber.clients import EufyHomeSession, TuyaAPISession
@@ -28,6 +28,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     username = entry.data[CONF_EMAIL]
     password = entry.data[CONF_PASSWORD]
+    manual_ip = entry.data.get(CONF_IP_ADDRESS, "").strip() # HIER NEU
 
     client = EufyHomeSession(username, password)
 
@@ -45,8 +46,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         hass.data[DOMAIN][entry.entry_id].setdefault(CONF_DISCOVERED_DEVICES, {})
 
-        detected_devices = await discover()
-        logger.debug("Detected devices on local network: %s", list(detected_devices.keys()))
+        # HIER NEU: Wir machen den Scan nur noch, wenn keine IP angegeben wurde
+        detected_devices = {}
+        if not manual_ip:
+            detected_devices = await discover()
+            logger.debug("Detected devices on local network: %s", list(detected_devices.keys()))
+        else:
+            logger.debug("Manual IP provided: %s. Skipping UDP discovery.", manual_ip)
 
         for home in homes:
             devices_for_home = await hass.async_add_executor_job(tuya_session.list_devices, home["groupId"])
@@ -57,19 +63,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 device_id = device["devId"]
                 local_key = device["localKey"]
                 
-                logger.debug("Looking for device_id '%s' in detected devices", device_id)
+                device_ip = None
 
-                # Fix KeyError: use pop with default value None
-                discovered_device = detected_devices.pop(device_id, None)
-                if discovered_device:
-                    device_ip = discovered_device["ip"]
+                # HIER NEU: Weiche für IP-Zuweisung
+                if manual_ip:
+                    device_ip = manual_ip
+                    logger.debug("Using manually configured IP %s for device ID %s", device_ip, device_id)
+                else:
+                    logger.debug("Looking for device_id '%s' in detected devices", device_id)
+                    discovered_device = detected_devices.pop(device_id, None)
+                    if discovered_device:
+                        device_ip = discovered_device["ip"]
+                        logger.debug("Found matching discovered device at %s for device ID %s", device_ip, device_id)
 
-                    logger.debug(
-                        "Found matching discovered device at %s for device ID %s",
-                        device_ip,
-                        device_id,
-                    )
-
+                if device_ip:
                     hass_entity_id = f'{home["groupId"]}-{device["devId"]}'
 
                     coordinator = EufyTuyaDataUpdateCoordinator(
