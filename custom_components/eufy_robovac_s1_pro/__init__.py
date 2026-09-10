@@ -3,19 +3,43 @@ Quick and dirty module to support Eufy S1 Pro.
 """
 
 import asyncio
+import json
 import logging
 from datetime import timedelta
 
+import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.helpers import config_validation as cv
 
 from .const import CONF_COORDINATOR, CONF_DISCOVERED_DEVICES, DOMAIN, PLATFORMS, CONF_IP_ADDRESS
 from .coordinators import EufyTuyaDataUpdateCoordinator
+from . import room_clean as rc
 from .discovery import discover
 from .eufy_local_id_grabber.clients import EufyHomeSession, TuyaAPISession
 
 logger = logging.getLogger(__name__)
+
+SERVICE_DUMP_DPS = "dump_dps"
+SERVICE_WRITE_DPS = "write_dps"
+SERVICE_CLEAN_ROOMS = "clean_rooms"
+SERVICE_CANCEL_CLEAN = "cancel_clean"
+
+CLEAN_ROOMS_SCHEMA = vol.Schema(
+    {
+        vol.Required("rooms"): vol.All(cv.ensure_list, [vol.All(int, vol.Range(min=0, max=31))]),
+        vol.Optional("delay", default=120): vol.All(int, vol.Range(min=0, max=3600)),
+        vol.Optional("cycle", default=0): vol.All(int, vol.Range(min=0, max=127)),
+    }
+)
+
+WRITE_DPS_SCHEMA = vol.Schema(
+    {
+        vol.Required("dps_id"): vol.All(cv.string, vol.Length(min=1, max=4)),
+        vol.Required("value"): vol.Any(cv.string, cv.boolean, int, float),
+    }
+)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -133,7 +157,150 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     logger.error("Failed to setup platform %s: %s", platform, e)
                     # Continue with other platforms even if one fails
 
+        _async_register_services(hass)
+
         return True
+
+
+def _async_register_services(hass: HomeAssistant) -> None:
+    """Register integration-wide services (idempotent across config entries)."""
+    if hass.services.has_service(DOMAIN, SERVICE_DUMP_DPS):
+        return
+
+    async def _handle_dump_dps(call: ServiceCall) -> None:
+        """Dump every coordinator's current DPS dict to the HA log at INFO."""
+        entries = hass.data.get(DOMAIN, {})
+        if not entries:
+            logger.info("dump_dps: no Eufy RoboVac S1 Pro entries are loaded")
+            return
+        for entry_id, entry_data in entries.items():
+            for entity_id, info in entry_data.get(CONF_DISCOVERED_DEVICES, {}).items():
+                coordinator = info.get(CONF_COORDINATOR)
+                if coordinator is None:
+                    continue
+                logger.info(
+                    "dump_dps[%s/%s]: %s",
+                    entry_id,
+                    entity_id,
+                    json.dumps(coordinator.data or {}, default=str, ensure_ascii=False),
+                )
+
+    async def _handle_write_dps(call: ServiceCall) -> None:
+        """Write a raw value to a Tuya DPS on every coordinator (Phase 0 only)."""
+        dps_id = str(call.data["dps_id"])
+        value = call.data["value"]
+        entries = hass.data.get(DOMAIN, {})
+        if not entries:
+            logger.warning("write_dps: no Eufy RoboVac S1 Pro entries are loaded")
+            return
+        for entry_id, entry_data in entries.items():
+            for entity_id, info in entry_data.get(CONF_DISCOVERED_DEVICES, {}).items():
+                coordinator = info.get(CONF_COORDINATOR)
+                if coordinator is None:
+                    continue
+                logger.info(
+                    "write_dps[%s/%s]: writing DPS %s = %r (Phase 0 trial)",
+                    entry_id,
+                    entity_id,
+                    dps_id,
+                    value,
+                )
+                try:
+                    await coordinator.tuya_client.async_set({dps_id: value})
+                except Exception:
+                    logger.exception(
+                        "write_dps[%s/%s]: write failed for DPS %s = %r",
+                        entry_id,
+                        entity_id,
+                        dps_id,
+                        value,
+                    )
+
+
+    async def _each_coordinator():
+        for entry_data in hass.data.get(DOMAIN, {}).values():
+            for info in entry_data.get(CONF_DISCOVERED_DEVICES, {}).values():
+                coordinator = info.get(CONF_COORDINATOR)
+                if coordinator is not None:
+                    yield coordinator
+
+    async def _handle_clean_rooms(call: ServiceCall) -> None:
+        """Raumreinigung ueber eine einmalige Aufgabe ausloesen."""
+        rooms = [int(r) for r in call.data["rooms"]]
+        delay = int(call.data.get("delay", 120))
+        cycle = int(call.data.get("cycle", 0))
+        async for coordinator in _each_coordinator():
+            value, start = rc.clean_rooms_value(rooms, delay=delay, cycle=cycle)
+            names = ", ".join(rc.ROOMS.get(r, str(r)) for r in rooms)
+            logger.info(
+                "clean_rooms: %s um %02d:%02d (in %s s)",
+                names, start.hour, start.minute, delay,
+            )
+            try:
+                await coordinator.tuya_client.async_set({rc.DPS_TIMER: value})
+            except Exception:
+                logger.exception("clean_rooms: Schreiben auf DPS %s fehlgeschlagen", rc.DPS_TIMER)
+                continue
+            hass.data.setdefault(DOMAIN, {})["_pending_clean"] = (start.hour, start.minute)
+            hass.bus.async_fire(
+                f"{DOMAIN}_clean_scheduled",
+                {"rooms": rooms, "names": names, "start": start.isoformat()},
+            )
+
+    async def _handle_cancel_clean(call: ServiceCall) -> None:
+        """Loescht die zuletzt selbst geplante Aufgabe.
+
+        Nur diese eine - vom Benutzer in der App angelegte Einmal-Aufgaben
+        bleiben unangetastet. Ohne gemerkte Startzeit passiert nichts.
+        """
+        pending = hass.data.get(DOMAIN, {}).get("_pending_clean")
+        if pending is None:
+            logger.info("cancel_clean: keine selbst geplante Aufgabe bekannt")
+            hass.bus.async_fire(f"{DOMAIN}_clean_cancelled", {"removed": 0})
+            return
+        hour, minute = pending
+        removed = 0
+        async for coordinator in _each_coordinator():
+            # Der zwischengespeicherte Stand kennt die eben angelegte Aufgabe
+            # womoeglich noch nicht - deshalb vorher aktiv nachfragen.
+            try:
+                await coordinator.tuya_client.async_set(
+                    {rc.DPS_TIMER: rc.request(rc.M_INQUIRY)}
+                )
+                await asyncio.sleep(1)
+                await coordinator.async_request_refresh()
+            except Exception:
+                logger.exception("cancel_clean: Abfrage fehlgeschlagen")
+            current = (coordinator.data or {}).get(rc.DPS_TIMER)
+            if not current:
+                logger.warning("cancel_clean: DPS %s ist unbekannt", rc.DPS_TIMER)
+                continue
+            timer_id = rc.find_timer_id(current, hour, minute)
+            if timer_id is None:
+                logger.info(
+                    "cancel_clean: keine Einmal-Aufgabe um %02d:%02d gefunden", hour, minute
+                )
+                continue
+            try:
+                await coordinator.tuya_client.async_set(
+                    {rc.DPS_TIMER: rc.delete_value(timer_id)}
+                )
+                removed += 1
+            except Exception:
+                logger.exception("cancel_clean: Loeschen von Aufgabe %s fehlgeschlagen", timer_id)
+        if removed:
+            hass.data.setdefault(DOMAIN, {}).pop("_pending_clean", None)
+        logger.info("cancel_clean: %s Aufgabe(n) geloescht", removed)
+        hass.bus.async_fire(f"{DOMAIN}_clean_cancelled", {"removed": removed})
+
+    hass.services.async_register(DOMAIN, SERVICE_DUMP_DPS, _handle_dump_dps)
+    hass.services.async_register(
+        DOMAIN, SERVICE_WRITE_DPS, _handle_write_dps, schema=WRITE_DPS_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_CLEAN_ROOMS, _handle_clean_rooms, schema=CLEAN_ROOMS_SCHEMA
+    )
+    hass.services.async_register(DOMAIN, SERVICE_CANCEL_CLEAN, _handle_cancel_clean)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

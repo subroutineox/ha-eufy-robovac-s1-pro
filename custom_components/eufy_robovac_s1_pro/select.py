@@ -1,4 +1,5 @@
 """Select platform for Eufy Robovac."""
+import base64
 import logging
 from typing import Any
 import asyncio
@@ -46,6 +47,47 @@ DPS_TO_MODE_MAP = {
     ("FgoMCgIIAhIAGgAiAggBEgYIARABIAE=", "middle"): "mop_middle",
     ("FgoMCgIIAhIAGgAiAggCEgYIARABIAE=", "high"): "mop_high",
 }
+
+
+def _is_mopping(dps154: str) -> bool | None:
+    """Liest aus DPS 154, ob gewischt wird. None = nicht auswertbar."""
+    try:
+        raw = base64.b64decode(dps154)
+    except Exception:
+        return None
+    if not raw:
+        return None
+    i = 0
+    n = 0
+    shift = 0
+    while i < len(raw):                       # Laengen-Varint ueberspringen
+        b = raw[i]; i += 1
+        n |= (b & 0x7F) << shift; shift += 7
+        if not b & 0x80:
+            break
+    body = raw[i:] if n == len(raw) - i else raw
+    # Feld 1 (laengenbegrenzt) suchen, darin Feld 1: gesetzt = Wischen an
+    j = 0
+    while j < len(body):
+        key = body[j]; j += 1
+        f, w = key >> 3, key & 7
+        if w != 2:
+            return None
+        ln = body[j]; j += 1
+        sub = body[j:j + ln]; j += ln
+        if f == 1:
+            k = 0
+            while k < len(sub):
+                sk = sub[k]; k += 1
+                sf, sw = sk >> 3, sk & 7
+                if sw != 2:
+                    return None
+                sl = sub[k]; k += 1
+                val = sub[k:k + sl]; k += sl
+                if sf == 1:
+                    return len(val) > 0
+            return False
+    return None
 
 
 async def async_setup_entry(
@@ -109,31 +151,31 @@ class CleaningModeSelect(CoordinatorEntity, RestoreEntity, SelectEntity):
 
     @property
     def current_option(self) -> str | None:
-        """Return the currently selected option."""
+        """Aktuellen Modus bestimmen.
+
+        Frueher wurde DPS 154 als kompletter Base64-String verglichen. Dieser
+        Wert aendert sich aber auch mit der Saugstufe, wodurch keiner der
+        hinterlegten Strings mehr passte und der Modus "unbekannt" wurde.
+        Jetzt wird nur das Wischen aus DPS 154 gelesen (Feld 1.1 gesetzt =
+        Wischen aktiv) und die Wasserstufe aus DPS 10.
+        """
         if not self.coordinator.data:
             return self._restored_option
-        
+
         dps154 = self.coordinator.data.get("154", "")
         dps10 = self.coordinator.data.get("10", None)
-        
-        # Check if DPS 10 is a string (water level)
-        if isinstance(dps10, str) and dps10 in ["low", "middle", "high"]:
-            water_level = dps10
-        else:
-            water_level = None
-        
-        # Try to find matching mode
-        mode_key = (dps154, water_level)
-        if mode_key in DPS_TO_MODE_MAP:
-            mode = DPS_TO_MODE_MAP[mode_key]
-            if mode in CLEANING_MODES:
-                return CLEANING_MODES[mode]["name"]
-        
-        # Try without water level (vacuum mode)
-        if dps154 == CLEANING_MODES["vacuum"]["dps154"]:
+        water = dps10 if isinstance(dps10, str) and dps10 in ("low", "middle", "high") else None
+
+        # Exakte Treffer weiterhin zuerst - falls das Geraet doch mal passt.
+        if (dps154, water) in DPS_TO_MODE_MAP:
+            return CLEANING_MODES[DPS_TO_MODE_MAP[(dps154, water)]]["name"]
+
+        mopping = _is_mopping(dps154)
+        if mopping is None:
+            return self._restored_option
+        if not mopping:
             return CLEANING_MODES["vacuum"]["name"]
-        
-        return None
+        return CLEANING_MODES[{"low": "mop_low", "middle": "mop_middle"}.get(water, "mop_high")]["name"]
 
     async def async_select_option(self, option: str) -> None:
         """Change the selected option."""

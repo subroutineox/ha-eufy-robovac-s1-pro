@@ -1,0 +1,71 @@
+dump_dps:
+  name: Dump DPS state
+  description: >-
+    Dump every coordinator's current DPS dictionary to the Home Assistant log at
+    INFO level. Used during the room-cleaning feature investigation (Phase 0) to
+    snapshot the device state at a chosen moment so that DPS publish triggers
+    can be correlated with Eufy app actions.
+
+write_dps:
+  name: Write raw DPS (Phase 0 testing only)
+  description: >-
+    WARNING — for Phase 0 reverse-engineering of the room-cleaning feature only.
+    Writes a raw value to an arbitrary Tuya DPS on every connected device.
+    Misuse can trigger unintended robot behavior (e.g. starting a clean,
+    overwriting map data). Only use values suggested by the developer.
+  fields:
+    dps_id:
+      name: DPS ID
+      description: The Tuya DPS ID to write (e.g. "121", "140", "141").
+      required: true
+      example: "121"
+      selector:
+        text:
+    value:
+      name: Value
+      description: >-
+        The value to write. Strings, booleans, integers, and floats are
+        accepted. Use an empty string ("") to send an empty payload.
+      required: true
+      example: ""
+      selector:
+        text:
+
+clean_rooms:
+  name: Räume reinigen
+  description: >-
+    Legt eine einmalige Aufgabe für die gewählten Räume an. Der Roboter startet
+    sie selbst, sobald die Minute erreicht ist. Umgeht damit den defekten
+    Raumbefehl auf DPS 152.
+  fields:
+    rooms:
+      name: Räume
+      description: "Raum-IDs: 0 Wohnzimmer, 1 Schlafzimmer, 2 Flur, 3 Badezimmer, 4 Küche"
+      required: true
+      example: "[3]"
+      selector:
+        object:
+    delay:
+      name: Vorlauf
+      description: Sekunden bis zum Start. Wird auf die nächste volle Minute aufgerundet.
+      default: 120
+      selector:
+        number:
+          min: 0
+          max: 3600
+          unit_of_measurement: s
+    cycle:
+      name: Wochentage
+      description: >-
+        0 = einmalig. Sonst Bitmaske, Bit 0 = Sonntag bis Bit 6 = Samstag,
+        127 = täglich.
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 127
+
+cancel_clean:
+  name: Geplante Reinigung abbrechen
+  description: >-
+    Löscht alle einmaligen Aufgaben. Wiederkehrende Zeitpläne bleiben unangetastet.
