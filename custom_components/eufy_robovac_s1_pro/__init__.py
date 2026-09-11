@@ -217,19 +217,29 @@ def _async_register_services(hass: HomeAssistant) -> None:
                     )
 
 
-    async def _each_coordinator():
-        for entry_data in hass.data.get(DOMAIN, {}).values():
-            for info in entry_data.get(CONF_DISCOVERED_DEVICES, {}).values():
+    def _coordinators():
+        """Momentaufnahme der Coordinatoren.
+
+        Bewusst eine Liste: waehrend der Verarbeitung wird hass.data
+        veraendert, und ueber ein Dictionary zu iterieren, das sich dabei
+        aendert, laesst Python abbrechen.
+        """
+        found = []
+        for entry_data in list(hass.data.get(DOMAIN, {}).values()):
+            if not isinstance(entry_data, dict):
+                continue
+            for info in list(entry_data.get(CONF_DISCOVERED_DEVICES, {}).values()):
                 coordinator = info.get(CONF_COORDINATOR)
                 if coordinator is not None:
-                    yield coordinator
+                    found.append(coordinator)
+        return found
 
     async def _handle_clean_rooms(call: ServiceCall) -> None:
         """Raumreinigung ueber eine einmalige Aufgabe ausloesen."""
         rooms = [int(r) for r in call.data["rooms"]]
         delay = int(call.data.get("delay", 120))
         cycle = int(call.data.get("cycle", 0))
-        async for coordinator in _each_coordinator():
+        for coordinator in _coordinators():
             value, start = rc.clean_rooms_value(rooms, delay=delay, cycle=cycle)
             names = ", ".join(rc.ROOMS.get(r, str(r)) for r in rooms)
             logger.info(
@@ -241,7 +251,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             except Exception:
                 logger.exception("clean_rooms: Schreiben auf DPS %s fehlgeschlagen", rc.DPS_TIMER)
                 continue
-            hass.data.setdefault(DOMAIN, {})["_pending_clean"] = (start.hour, start.minute)
+            hass.data[f"{DOMAIN}_pending_clean"] = (start.hour, start.minute)
             hass.bus.async_fire(
                 f"{DOMAIN}_clean_scheduled",
                 {"rooms": rooms, "names": names, "start": start.isoformat()},
@@ -253,14 +263,14 @@ def _async_register_services(hass: HomeAssistant) -> None:
         Nur diese eine - vom Benutzer in der App angelegte Einmal-Aufgaben
         bleiben unangetastet. Ohne gemerkte Startzeit passiert nichts.
         """
-        pending = hass.data.get(DOMAIN, {}).get("_pending_clean")
+        pending = hass.data.get(f"{DOMAIN}_pending_clean")
         if pending is None:
             logger.info("cancel_clean: keine selbst geplante Aufgabe bekannt")
             hass.bus.async_fire(f"{DOMAIN}_clean_cancelled", {"removed": 0})
             return
         hour, minute = pending
         removed = 0
-        async for coordinator in _each_coordinator():
+        for coordinator in _coordinators():
             # Der zwischengespeicherte Stand kennt die eben angelegte Aufgabe
             # womoeglich noch nicht - deshalb vorher aktiv nachfragen.
             try:
@@ -289,7 +299,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             except Exception:
                 logger.exception("cancel_clean: Loeschen von Aufgabe %s fehlgeschlagen", timer_id)
         if removed:
-            hass.data.setdefault(DOMAIN, {}).pop("_pending_clean", None)
+            hass.data.pop(f"{DOMAIN}_pending_clean", None)
         logger.info("cancel_clean: %s Aufgabe(n) geloescht", removed)
         hass.bus.async_fire(f"{DOMAIN}_clean_cancelled", {"removed": removed})
 
