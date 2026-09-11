@@ -40,7 +40,13 @@ action: eufy_robovac_s1_pro.clean_rooms
 data:
   rooms: [3, 4]      # cleaned in this order
   delay: 120         # seconds, rounded up to the next full minute
+  repeats: 1         # optional, 1 or 2 passes
 ```
+
+Fan speed, water level and whether to mop are **taken from the robot's current
+settings** — DPS 9, DPS 10 and DPS 154. Set them however you like (the vacuum
+entity's fan speed, or `select.cleaning_mode`) and the scheduled clean uses the
+same values. One setting, no second place to maintain.
 
 ```yaml
 action: eufy_robovac_s1_pro.cancel_clean
@@ -74,7 +80,27 @@ IDs usually start at 0 and are contiguous. Rename them back afterwards.
 - Do Not Disturb suppresses scheduled tasks. A task landing inside that window
   silently does nothing.
 - Because tasks fire on the minute, there is up to a minute of latency.
+- After a Home Assistant restart the robot only publishes a small set of simple
+  values. Cleaning mode and similar stay unknown until something changes.
 - Only tested on firmware 7.0.154.
+
+### Protocol notes
+
+For anyone wanting to build on this: the cleaning parameters inside a scheduled
+task sit in their own protobuf block, and **every setting is omitted at its
+lowest value** — which makes guessing unreliable.
+
+| field | meaning | values |
+|---|---|---|
+| 2 | fan speed | omitted = quiet, 1 = standard, 2 = turbo, 3 = max |
+| 3 | water level | omitted = low, 1 = medium, 2 = high |
+| 4 | mopping | omitted = vacuum only, 2 = vacuum and mop |
+| 6 | rooms, repeated | `{1: room_id, 2: order}` |
+| 17 | repeats | 1 or 2 |
+
+The wire format for every protobuf DPS is `<varint length><protobuf>`, base64
+encoded. Request and response are **different message types on the same DPS** —
+writing the device's own published value back to it does nothing, or worse.
 
 ## Diagnostic services
 
@@ -191,6 +217,16 @@ Please report bugs and feature requests via [Issues](https://github.com/subrouti
 Pull requests are welcome!
 
 ## Changelog
+
+### v1.2.0 (fork)
+- **New: scheduled cleans inherit the live settings** — fan speed, water level
+  and mopping are read from DPS 9, 10 and 154 when the task is created, so one
+  setting applies to manual and scheduled cleaning alike.
+- **New: `repeats` option** on `clean_rooms` for one or two passes.
+- **Fix: fan speed mapping** — DPS 9 reports `gentle`/`normal`/`strong`/`max`,
+  not the display names, so "standard" was being planned as "quiet".
+- Hardened the protobuf parser against truncated or unexpected payloads; it now
+  degrades gracefully instead of raising.
 
 ### v1.1.0 (fork)
 - **New: local room cleaning** — `clean_rooms` and `cancel_clean` services. Room
