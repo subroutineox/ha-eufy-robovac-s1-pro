@@ -31,6 +31,7 @@ CLEAN_ROOMS_SCHEMA = vol.Schema(
         vol.Required("rooms"): vol.All(cv.ensure_list, [vol.All(int, vol.Range(min=0, max=31))]),
         vol.Optional("delay", default=120): vol.All(int, vol.Range(min=0, max=3600)),
         vol.Optional("cycle", default=0): vol.All(int, vol.Range(min=0, max=127)),
+        vol.Optional("repeats", default=1): vol.All(int, vol.Range(min=1, max=2)),
     }
 )
 
@@ -239,12 +240,19 @@ def _async_register_services(hass: HomeAssistant) -> None:
         rooms = [int(r) for r in call.data["rooms"]]
         delay = int(call.data.get("delay", 120))
         cycle = int(call.data.get("cycle", 0))
+        repeats = int(call.data.get("repeats", 1))
         for coordinator in _coordinators():
-            value, start = rc.clean_rooms_value(rooms, delay=delay, cycle=cycle)
+            # Saugstufe, Wassermenge und Wischen aus dem Live-Zustand uebernehmen,
+            # damit eine Einstellung fuer manuelle und geplante Reinigung gilt.
+            params = rc.params_from_dps(coordinator.data)
+            value, start = rc.clean_rooms_value(
+                rooms, delay=delay, cycle=cycle, repeats=repeats, **params
+            )
             names = ", ".join(rc.ROOMS.get(r, str(r)) for r in rooms)
             logger.info(
-                "clean_rooms: %s um %02d:%02d (in %s s)",
+                "clean_rooms: %s um %02d:%02d (in %s s), fan=%s water=%s mop=%s x%s",
                 names, start.hour, start.minute, delay,
+                params["fan"], params["water"], params["mop"], repeats,
             )
             try:
                 await coordinator.tuya_client.async_set({rc.DPS_TIMER: value})
@@ -285,7 +293,11 @@ def _async_register_services(hass: HomeAssistant) -> None:
             if not current:
                 logger.warning("cancel_clean: DPS %s ist unbekannt", rc.DPS_TIMER)
                 continue
-            timer_id = rc.find_timer_id(current, hour, minute)
+            try:
+                timer_id = rc.find_timer_id(current, hour, minute)
+            except Exception:
+                logger.exception("cancel_clean: Aufgabenliste nicht lesbar")
+                continue
             if timer_id is None:
                 logger.info(
                     "cancel_clean: keine Einmal-Aufgabe um %02d:%02d gefunden", hour, minute

@@ -69,3 +69,11 @@ cancel_clean:
   name: Geplante Reinigung abbrechen
   description: >-
     Löscht alle einmaligen Aufgaben. Wiederkehrende Zeitpläne bleiben unangetastet.
+    repeats:
+      name: Durchgänge
+      description: Wie oft jeder Raum gereinigt wird.
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 2

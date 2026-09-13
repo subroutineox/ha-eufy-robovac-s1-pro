@@ -73,7 +73,11 @@ def _is_mopping(dps154: str) -> bool | None:
         f, w = key >> 3, key & 7
         if w != 2:
             return None
+        if j >= len(body):
+            return None
         ln = body[j]; j += 1
+        if ln > 0x7F or j + ln > len(body):
+            return None
         sub = body[j:j + ln]; j += ln
         if f == 1:
             k = 0
@@ -82,7 +86,11 @@ def _is_mopping(dps154: str) -> bool | None:
                 sf, sw = sk >> 3, sk & 7
                 if sw != 2:
                     return None
+                if k >= len(sub):
+                    return None
                 sl = sub[k]; k += 1
+                if sl > 0x7F or k + sl > len(sub):
+                    return None
                 val = sub[k:k + sl]; k += sl
                 if sf == 1:
                     return len(val) > 0
