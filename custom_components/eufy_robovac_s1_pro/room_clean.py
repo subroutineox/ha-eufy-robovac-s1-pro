@@ -60,8 +60,11 @@ def _lf(field: int, payload: bytes) -> bytes:
 
 
 def _read_varint(buf: bytes, i: int) -> tuple[int, int]:
+    """Liest ein Varint. Wirft ValueError statt IndexError bei Abbruch."""
     r = s = 0
     while True:
+        if i >= len(buf) or s > 63:
+            raise ValueError("varint abgeschnitten")
         x = buf[i]
         i += 1
         r |= (x & 0x7F) << s
@@ -71,20 +74,45 @@ def _read_varint(buf: bytes, i: int) -> tuple[int, int]:
 
 
 def _fields(buf: bytes):
-    """Iteriert (feldnummer, wiretype, wert) auf einer Ebene."""
+    """Iteriert (feldnummer, wiretype, wert) auf einer Ebene.
+
+    Bricht bei unvollstaendigen oder unbekannten Daten sauber ab, statt eine
+    Ausnahme zu werfen - der Aufrufer bekommt dann eben weniger Felder.
+    """
     i = 0
     while i < len(buf):
-        key, i = _read_varint(buf, i)
+        try:
+            key, i = _read_varint(buf, i)
+        except ValueError:
+            return
         f, w = key >> 3, key & 7
+        if f == 0:
+            return
         if w == 0:
-            v, i = _read_varint(buf, i)
+            try:
+                v, i = _read_varint(buf, i)
+            except ValueError:
+                return
             yield f, 0, v
         elif w == 2:
-            ln, i = _read_varint(buf, i)
+            try:
+                ln, i = _read_varint(buf, i)
+            except ValueError:
+                return
+            if ln < 0 or i + ln > len(buf):
+                return
             yield f, 2, buf[i:i + ln]
             i += ln
-        else:  # 1 = 64bit, 5 = 32bit - kommt bei diesem Geraet nicht vor
-            i += 8 if w == 1 else 4
+        elif w == 1:
+            if i + 8 > len(buf):
+                return
+            i += 8
+        elif w == 5:
+            if i + 4 > len(buf):
+                return
+            i += 4
+        else:  # 3/4 sind veraltete Gruppen - hier nicht auswertbar
+            return
 
 
 def _wire(payload: bytes) -> str:
@@ -92,32 +120,57 @@ def _wire(payload: bytes) -> str:
 
 
 def _unwire(value: str) -> bytes:
-    raw = base64.b64decode(value)
-    n, i = _read_varint(raw, 0)
+    try:
+        raw = base64.b64decode(value)
+    except Exception:
+        return b""
+    if not raw:
+        return b""
+    try:
+        n, i = _read_varint(raw, 0)
+    except ValueError:
+        return raw
     return raw[i:] if n == len(raw) - i else raw
 
 
 # --- Nachrichten ------------------------------------------------------------
 
+# Feldbelegung der Reinigungsparameter, durch Messung an der App belegt:
+#   Feld 2 Saugstufe    fehlt = Leise, 1 = Standard, 2 = Turbo, 3 = Max
+#   Feld 3 Wassermenge  fehlt = niedrig, 1 = mittel, 2 = hoch
+#   Feld 4 Wischen      fehlt = nur saugen, 2 = wischen
+#   Feld 6 Raumliste    {1: Raum-ID, 2: Reihenfolge}
+#   Feld 17 Durchgaenge
+# DPS 9 meldet gentle/normal/strong/max; die Klartextnamen aus DPS 158
+# sind zusaetzlich aufgenommen, falls mal der andere Wert ankommt.
+FAN = {
+    "gentle": 0, "quiet": 0,
+    "normal": 1, "standard": 1,
+    "strong": 2, "turbo": 2,
+    "max": 3, "maximum": 3,
+}
+WATER = {"low": 0, "middle": 1, "high": 2}
+
+
 def build_timer(rooms: list[int], hour: int, minute: int,
-                fan: int = 1, mop: int = 1, clean_type: int = 1,
-                extent: int = 2, cycle: int = 0) -> bytes:
+                fan: int = 0, water: int = 0, mop: bool = False,
+                repeats: int = 1, cycle: int = 0) -> bytes:
     """Baut eine TimerInfo nach dem Muster, das das Geraet selbst sendet.
 
     cycle = 0 erzeugt eine einmalige Aufgabe (Feld entfaellt), sonst eine
     Wochentagsmaske: Bit 0 = Sonntag ... Bit 6 = Samstag, 127 = taeglich.
     """
-    # ScheduleRoomsClean, wie in DPS 164 beobachtet: rooms liegen auf Feld 6
-    params = (
-        _vf(1, fan)
-        + _lf(2, _vf(1, mop))
-        + _lf(3, _vf(1, clean_type))
-        + _lf(4, _vf(1, extent))
-        + _lf(5, b"")
-    )
+    params = _vf(1, 1)
+    if fan:
+        params += _lf(2, _vf(1, fan))
+    if mop and water:
+        params += _lf(3, _vf(1, water))
+    if mop:
+        params += _lf(4, _vf(1, 2))
+    params += _lf(5, b"")
     for order, rid in enumerate(rooms):
         params += _lf(6, _vf(1, rid) + _vf(2, order))
-    params += _vf(17, 1)
+    params += _vf(17, max(1, int(repeats)))
 
     timing = _vf(2, 1) + _vf(3, hour) + _vf(4, minute)
     desc = _vf(1, 1) + _lf(2, timing)
@@ -140,6 +193,33 @@ def request(method: int, timer: bytes | None = None) -> str:
     return _wire(payload)
 
 
+def params_from_dps(data: dict | None) -> dict:
+    """Leitet Saugstufe, Wassermenge und Wischen aus dem Live-Zustand ab.
+
+    So gilt eine Einstellung fuer manuelle wie geplante Reinigung:
+    DPS 9 = Saugstufe, DPS 10 = Wassermenge, DPS 154 = wird gewischt.
+    """
+    data = data or {}
+    fan = FAN.get(str(data.get("9", "")).lower(), 0)
+    water = WATER.get(str(data.get("10", "")).lower(), 0)
+    mop = _mopping(str(data.get("154", "")))
+    return {"fan": fan, "water": water, "mop": bool(mop)}
+
+
+def _mopping(dps154: str) -> bool | None:
+    """Wischen aktiv? Feld 1.1 in DPS 154 gesetzt bedeutet ja."""
+    body = _unwire(dps154)
+    if not body:
+        return None
+    for f, w, d in _fields(body):
+        if f == 1 and w == 2:
+            for sf, sw, sv in _fields(d):
+                if sf == 1:
+                    return len(sv) > 0 if sw == 2 else bool(sv)
+            return False
+    return None
+
+
 def clean_rooms_value(rooms: list[int], delay: int = 120,
                       now: datetime | None = None, **kw) -> tuple[str, datetime]:
     """Fertiger DPS-164-Wert plus der Zeitpunkt, zu dem er starten wird."""
@@ -159,7 +239,11 @@ def clean_rooms_value(rooms: list[int], delay: int = 120,
 def parse_timers(value: str) -> list[dict]:
     """Liest TimerResponse (DPS 164) und liefert die Aufgaben als dicts."""
     out: list[dict] = []
-    for f, w, v in _fields(_unwire(value)):
+    try:
+        body = _unwire(value)
+    except Exception:
+        return out
+    for f, w, v in _fields(body):
         if f != 4 or w != 2:
             continue
         info: dict = {"id": None, "hour": None, "minute": None,
