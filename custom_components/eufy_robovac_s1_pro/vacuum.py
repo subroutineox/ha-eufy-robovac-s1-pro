@@ -11,7 +11,7 @@ from homeassistant.components.vacuum import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -43,15 +43,15 @@ EUFY_TO_HA_FAN_SPEED_MAP = {
 
 # S1 Pro Command definitions for DPS 152 (from actual app logs)
 S1_PRO_COMMANDS = {
-    "start": "AA==",        # 掃除開始
-    "cleaning": "AggO",     # 掃除中
-    "pause": "AggN",        # 一時停止
-    "return": "AggG",       # ステーション帰還
+    "start": "AA==",        # æŽƒé™¤é–‹å§‹
+    "cleaning": "AggO",     # æŽƒé™¤ä¸­
+    "pause": "AggN",        # ä¸€æ™‚åœæ­¢
+    "return": "AggG",       # ã‚¹ãƒ†ãƒ¼ã‚·ãƒ§ãƒ³å¸°é‚„
 }
 
 
 class RobovacState(Enum):
-    """ロボット掃除機の状態定義"""
+    """ãƒ­ãƒœãƒƒãƒˆæŽƒé™¤æ©Ÿã®çŠ¶æ…‹å®šç¾©"""
     CLEANING = "cleaning"
     PAUSED = "paused"
     RETURNING = "returning"
@@ -62,31 +62,31 @@ class RobovacState(Enum):
 
 def decode_dps153_to_state(dps153_value: str) -> tuple[RobovacState, str]:
     """
-    dps153の値からロボット掃除機の状態とサブステータスを判定
+    dps153ã®å€¤ã‹ã‚‰ãƒ­ãƒœãƒƒãƒˆæŽƒé™¤æ©Ÿã®çŠ¶æ…‹ã¨ã‚µãƒ–ã‚¹ãƒ†ãƒ¼ã‚¿ã‚¹ã‚’åˆ¤å®š
     
-    この関数は環境や設定の違いに対応できるよう、バイトパターンの
-    普遍的な特徴に基づいて判定を行います。
+    ã“ã®é–¢æ•°ã¯ç’°å¢ƒã‚„è¨­å®šã®é•ã„ã«å¯¾å¿œã§ãã‚‹ã‚ˆã†ã€ãƒã‚¤ãƒˆãƒ‘ã‚¿ãƒ¼ãƒ³ã®
+    æ™®éçš„ãªç‰¹å¾´ã«åŸºã¥ã„ã¦åˆ¤å®šã‚’è¡Œã„ã¾ã™ã€‚
     
-    判定ロジック:
+    åˆ¤å®šãƒ­ã‚¸ãƒƒã‚¯:
     1. Cleaning: Byte[1]=0x0a, Byte[2]=0x00, Byte[3]=0x10, Byte[4]=0x05, length=7
     2. Paused: Byte[1]=0x0a, Byte[2]=0x00, Byte[3]=0x10, Byte[4]=0x05, length>=9, Byte[6]=0x02
     3. Returning: Byte[1]=0x10, Byte[2]=0x07, Byte[3]=0x42
-    4. Docked: 上記以外の場合
+    4. Docked: ä¸Šè¨˜ä»¥å¤–ã®å ´åˆ
     
     Args:
-        dps153_value: Base64エンコードされたdps153の値、またはバイト列
+        dps153_value: Base64ã‚¨ãƒ³ã‚³ãƒ¼ãƒ‰ã•ã‚ŒãŸdps153ã®å€¤ã€ã¾ãŸã¯ãƒã‚¤ãƒˆåˆ—
         
     Returns:
-        (RobovacState, substatus_str): 判定された状態とサブステータス文字列のタプル
+        (RobovacState, substatus_str): åˆ¤å®šã•ã‚ŒãŸçŠ¶æ…‹ã¨ã‚µãƒ–ã‚¹ãƒ†ãƒ¼ã‚¿ã‚¹æ–‡å­—åˆ—ã®ã‚¿ãƒ—ãƒ«
     """
     try:
-        # Base64文字列の場合はデコード
+        # Base64æ–‡å­—åˆ—ã®å ´åˆã¯ãƒ‡ã‚³ãƒ¼ãƒ‰
         if isinstance(dps153_value, str):
             decoded = base64.b64decode(dps153_value)
         else:
             decoded = dps153_value
         
-        # 最低限の長さチェック
+        # æœ€ä½Žé™ã®é•·ã•ãƒã‚§ãƒƒã‚¯
         if len(decoded) < 3:
             logger.warning(f"dps153 data too short: {len(decoded)} bytes")
             return RobovacState.UNKNOWN, "unknown"
@@ -94,43 +94,43 @@ def decode_dps153_to_state(dps153_value: str) -> tuple[RobovacState, str]:
         byte1 = decoded[1]
         byte2 = decoded[2]
         
-        # デバッグログ
+        # ãƒ‡ãƒãƒƒã‚°ãƒ­ã‚°
         hex_str = ' '.join([f"{b:02x}" for b in decoded])
         logger.debug(f"dps153 decoded: {hex_str}")
         
-        # ========== 主要な状態判定 ==========
+        # ========== ä¸»è¦ãªçŠ¶æ…‹åˆ¤å®š ==========
         
-        # Byte[1]=0x0a, Byte[2]=0x00 のパターン
-        # (Cleaning, Paused, モップ関連Docked)
+        # Byte[1]=0x0a, Byte[2]=0x00 ã®ãƒ‘ã‚¿ãƒ¼ãƒ³
+        # (Cleaning, Paused, ãƒ¢ãƒƒãƒ—é–¢é€£Docked)
         if byte1 == 0x0a and byte2 == 0x00:
             if len(decoded) >= 5:
                 byte3 = decoded[3]
                 byte4 = decoded[4]
                 
-                # Cleaning/Pausedのパターン
+                # Cleaning/Pausedã®ãƒ‘ã‚¿ãƒ¼ãƒ³
                 if byte3 == 0x10 and byte4 == 0x05:
-                    # Pausedの判定
+                    # Pausedã®åˆ¤å®š
                     if len(decoded) >= 7 and decoded[6] == 0x02:
                         return RobovacState.PAUSED, "paused"
                     else:
                         return RobovacState.CLEANING, "cleaning"
                 
-                # モップ関連Dockedのパターン
+                # ãƒ¢ãƒƒãƒ—é–¢é€£Dockedã®ãƒ‘ã‚¿ãƒ¼ãƒ³
                 elif byte3 == 0x10 and byte4 == 0x09:
                     substatus = _get_docked_substatus(decoded)
                     return RobovacState.DOCKED, substatus
         
-        # Returning の判定
+        # Returning ã®åˆ¤å®š
         if byte1 == 0x10 and byte2 == 0x07:
             if len(decoded) >= 4 and decoded[3] == 0x42:
                 return RobovacState.RETURNING, "returning"
         
-        # Docked (その他) の判定
+        # Docked (ãã®ä»–) ã®åˆ¤å®š
         if byte1 == 0x10:
             substatus = _get_docked_substatus(decoded)
             return RobovacState.DOCKED, substatus
         
-        # デフォルトはDocked (未知のパターンでも安全側に倒す)
+        # ãƒ‡ãƒ•ã‚©ãƒ«ãƒˆã¯Docked (æœªçŸ¥ã®ãƒ‘ã‚¿ãƒ¼ãƒ³ã§ã‚‚å®‰å…¨å´ã«å€’ã™)
         logger.warning(f"Unknown dps153 pattern, defaulting to DOCKED: {hex_str}")
         return RobovacState.DOCKED, "idle"
         
@@ -141,13 +141,13 @@ def decode_dps153_to_state(dps153_value: str) -> tuple[RobovacState, str]:
 
 def _get_docked_substatus(decoded: bytes) -> str:
     """
-    Docked状態の詳細なサブステータスを取得
+    DockedçŠ¶æ…‹ã®è©³ç´°ãªã‚µãƒ–ã‚¹ãƒ†ãƒ¼ã‚¿ã‚¹ã‚’å–å¾—
     
     Args:
-        decoded: デコードされたdps153のバイト列
+        decoded: ãƒ‡ã‚³ãƒ¼ãƒ‰ã•ã‚ŒãŸdps153ã®ãƒã‚¤ãƒˆåˆ—
         
     Returns:
-        サブステータス文字列
+        ã‚µãƒ–ã‚¹ãƒ†ãƒ¼ã‚¿ã‚¹æ–‡å­—åˆ—
     """
     if len(decoded) < 3:
         return "unknown"
@@ -155,10 +155,10 @@ def _get_docked_substatus(decoded: bytes) -> str:
     byte1 = decoded[1]
     byte2 = decoded[2]
     
-    # Byte[1]=0x10 の場合
+    # Byte[1]=0x10 ã®å ´åˆ
     if byte1 == 0x10:
         if byte2 == 0x03:
-            # 充電関連
+            # å……é›»é–¢é€£
             if len(decoded) >= 5:
                 if decoded[4] == 0x00:
                     return "charging"
@@ -167,7 +167,7 @@ def _get_docked_substatus(decoded: bytes) -> str:
             return "charging"
         
         elif byte2 == 0x09:
-            # モップ関連操作
+            # ãƒ¢ãƒƒãƒ—é–¢é€£æ“ä½œ
             if len(decoded) >= 4:
                 byte3 = decoded[3]
                 
@@ -180,7 +180,7 @@ def _get_docked_substatus(decoded: bytes) -> str:
             
             return "mop_operations"
     
-    # Byte[1]=0x0a の場合 (給水中、掃除前モップ洗浄中など)
+    # Byte[1]=0x0a ã®å ´åˆ (çµ¦æ°´ä¸­ã€æŽƒé™¤å‰ãƒ¢ãƒƒãƒ—æ´—æµ„ä¸­ãªã©)
     if byte1 == 0x0a and byte2 == 0x00:
         if len(decoded) >= 5 and decoded[3] == 0x10 and decoded[4] == 0x09:
             if len(decoded) >= 12 and decoded[11] == 0x3a:
@@ -190,7 +190,7 @@ def _get_docked_substatus(decoded: bytes) -> str:
     return "idle"
 
 
-# サブステータスの人間が読める説明文
+# ã‚µãƒ–ã‚¹ãƒ†ãƒ¼ã‚¿ã‚¹ã®äººé–“ãŒèª­ã‚ã‚‹èª¬æ˜Žæ–‡
 SUBSTATUS_DESCRIPTIONS = {
     "charging": "Charging",
     "fully_charged": "Fully Charged",
@@ -227,8 +227,7 @@ class RobovacVacuum(CoordinatorEntity, StateVacuumEntity):
 
     _attr_name = "Eufy Robovac S1 Pro"
     _attr_supported_features = (
-        VacuumEntityFeature.BATTERY
-        | VacuumEntityFeature.PAUSE
+        VacuumEntityFeature.PAUSE
         | VacuumEntityFeature.RETURN_HOME
         | VacuumEntityFeature.START
         | VacuumEntityFeature.STATE
@@ -239,9 +238,9 @@ class RobovacVacuum(CoordinatorEntity, StateVacuumEntity):
         super().__init__(coordinator)
         self._last_command = None
         self._last_command_time = 0
-        self._was_paused = False  # 一時停止状態を記憶
-        self._substatus = None  # サブステータスを保持
-        self._detected_state = None  # 判定された状態を保持
+        self._was_paused = False  # ä¸€æ™‚åœæ­¢çŠ¶æ…‹ã‚’è¨˜æ†¶
+        self._substatus = None  # ã‚µãƒ–ã‚¹ãƒ†ãƒ¼ã‚¿ã‚¹ã‚’ä¿æŒ
+        self._detected_state = None  # åˆ¤å®šã•ã‚ŒãŸçŠ¶æ…‹ã‚’ä¿æŒ
 
     @property
     def icon(self) -> str:
@@ -284,13 +283,13 @@ class RobovacVacuum(CoordinatorEntity, StateVacuumEntity):
         if dps153:
             detected_state, substatus = decode_dps153_to_state(dps153)
             
-            # 判定結果を保持
+            # åˆ¤å®šçµæžœã‚’ä¿æŒ
             self._detected_state = detected_state
             self._substatus = substatus
             
             logger.debug(f"Detected state: {detected_state.value}, substatus: {substatus}")
             
-            # 状態に応じたフラグ更新と値の返却
+            # çŠ¶æ…‹ã«å¿œã˜ãŸãƒ•ãƒ©ã‚°æ›´æ–°ã¨å€¤ã®è¿”å´
             if detected_state == RobovacState.CLEANING:
                 self._was_paused = False
                 return VacuumActivity.CLEANING
@@ -306,11 +305,11 @@ class RobovacVacuum(CoordinatorEntity, StateVacuumEntity):
             elif detected_state == RobovacState.ERROR:
                 return VacuumActivity.ERROR
             else:  # UNKNOWN
-                # 未知の状態はIDLEとして扱う
+                # æœªçŸ¥ã®çŠ¶æ…‹ã¯IDLEã¨ã—ã¦æ‰±ã†
                 return VacuumActivity.IDLE
         
-        # DPS 153が利用できない場合のフォールバック
-        # (互換性のために旧ロジックを一部残す)
+        # DPS 153ãŒåˆ©ç”¨ã§ããªã„å ´åˆã®ãƒ•ã‚©ãƒ¼ãƒ«ãƒãƒƒã‚¯
+        # (äº’æ›æ€§ã®ãŸã‚ã«æ—§ãƒ­ã‚¸ãƒƒã‚¯ã‚’ä¸€éƒ¨æ®‹ã™)
         dps152 = self.coordinator.data.get("152", "")
         dps6 = self.coordinator.data.get("6", 0)
         dps7 = self.coordinator.data.get("7", 0)
@@ -338,18 +337,22 @@ class RobovacVacuum(CoordinatorEntity, StateVacuumEntity):
             self._was_paused = False
             return VacuumActivity.RETURNING
         elif dps6 == 0 and dps7 == 0:
-            battery = self.coordinator.data.get("8", 0)
+            battery = self._get_battery_level() or 0
             if battery >= 95:
                 return VacuumActivity.DOCKED
             else:
                 return VacuumActivity.IDLE
         
-        # デフォルト
+        # ãƒ‡ãƒ•ã‚©ãƒ«ãƒˆ
         return VacuumActivity.IDLE
 
-    @property
-    def battery_level(self) -> int | None:
-        """Returns the battery level as a percentage"""
+    def _get_battery_level(self) -> int | None:
+        """Battery level in percent.
+
+        Note: Home Assistant removed battery support from vacuum entities.
+        The value is kept here for internal logic and exposed as a state
+        attribute only.
+        """
         if self.coordinator.data:
             # S1 Pro uses DPS 8 for battery level (confirmed from logs)
             value = self.coordinator.data.get("8")
@@ -381,6 +384,15 @@ class RobovacVacuum(CoordinatorEntity, StateVacuumEntity):
             # Only include essential attributes for end users
             if error_code := self.error_code:
                 attrs["error_code"] = error_code
+            
+            if (battery := self._get_battery_level()) is not None:
+                attrs["battery_level"] = battery
+            
+            if self._substatus:
+                attrs["substatus"] = self._substatus
+                attrs["substatus_description"] = SUBSTATUS_DESCRIPTIONS.get(
+                    self._substatus, self._substatus
+                )
             
         return attrs
     
@@ -510,28 +522,28 @@ class RobovacVacuum(CoordinatorEntity, StateVacuumEntity):
         current_dps152 = self.coordinator.data.get("152", "")
         current_dps153 = self.coordinator.data.get("153", "")
         
-        # dps153の判定を新しいロジックで行う
+        # dps153ã®åˆ¤å®šã‚’æ–°ã—ã„ãƒ­ã‚¸ãƒƒã‚¯ã§è¡Œã†
         is_paused_by_dps153 = False
         if current_dps153:
             detected_state, _ = decode_dps153_to_state(current_dps153)
             is_paused_by_dps153 = (detected_state == RobovacState.PAUSED)
         
-        # 一時停止状態からの再開か確認
+        # ä¸€æ™‚åœæ­¢çŠ¶æ…‹ã‹ã‚‰ã®å†é–‹ã‹ç¢ºèª
         if (activity == VacuumActivity.PAUSED or 
             self._was_paused or 
             is_paused_by_dps153 or
             current_dps152 == S1_PRO_COMMANDS["pause"]):
-            # 一時停止からの再開 - cleaningコマンドのみ送信
+            # ä¸€æ™‚åœæ­¢ã‹ã‚‰ã®å†é–‹ - cleaningã‚³ãƒžãƒ³ãƒ‰ã®ã¿é€ä¿¡
             logger.info("Resuming from pause - sending cleaning command only")
             
-            # 掃除中コマンドを直接送信（「掃除を再開」のアナウンス）
+            # æŽƒé™¤ä¸­ã‚³ãƒžãƒ³ãƒ‰ã‚’ç›´æŽ¥é€ä¿¡ï¼ˆã€ŒæŽƒé™¤ã‚’å†é–‹ã€ã®ã‚¢ãƒŠã‚¦ãƒ³ã‚¹ï¼‰
             await self._send_command(S1_PRO_COMMANDS["cleaning"])
             
-            # 一時停止フラグをクリア
+            # ä¸€æ™‚åœæ­¢ãƒ•ãƒ©ã‚°ã‚’ã‚¯ãƒªã‚¢
             self._was_paused = False
             
         else:
-            # 新規開始（「掃除を開始」のアナウンス）
+            # æ–°è¦é–‹å§‹ï¼ˆã€ŒæŽƒé™¤ã‚’é–‹å§‹ã€ã®ã‚¢ãƒŠã‚¦ãƒ³ã‚¹ï¼‰
             logger.info("Starting new cleaning session")
             await self.async_turn_on()
 
@@ -540,7 +552,7 @@ class RobovacVacuum(CoordinatorEntity, StateVacuumEntity):
         logger.debug("Pausing vacuum via DPS 152")
         
         try:
-            # 一時停止状態を記憶
+            # ä¸€æ™‚åœæ­¢çŠ¶æ…‹ã‚’è¨˜æ†¶
             self._was_paused = True
             
             # Send pause command
@@ -549,7 +561,7 @@ class RobovacVacuum(CoordinatorEntity, StateVacuumEntity):
             logger.info("Vacuum paused")
         except Exception as e:
             logger.error(f"Failed to pause vacuum: {e}")
-            self._was_paused = False  # エラー時はリセット
+            self._was_paused = False  # ã‚¨ãƒ©ãƒ¼æ™‚ã¯ãƒªã‚»ãƒƒãƒˆ
 
     async def async_stop(self, **kwargs: Any) -> None:
         """Stop the vacuum - S1 Pro doesn't have stop, using pause instead."""
