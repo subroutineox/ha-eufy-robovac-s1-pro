@@ -77,3 +77,10 @@ cancel_clean:
         number:
           min: 1
           max: 2
+
+refresh_local_key:
+  name: Local Key neu holen
+  description: >-
+    Holt den lokalen Schlüssel des Roboters neu aus der eufy-/Tuya-Cloud und lädt die
+    Integration neu. Nur nötig, nachdem der Roboter zurückgesetzt oder in der App neu
+    gekoppelt wurde. Klappt der Abruf nicht, bleibt der gespeicherte Schlüssel erhalten.
