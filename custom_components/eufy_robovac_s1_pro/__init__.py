@@ -10,8 +10,11 @@ from datetime import timedelta
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.components import persistent_notification
+from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
+from homeassistant.util import dt as dt_util
 
 from .const import CONF_COORDINATOR, CONF_DISCOVERED_DEVICES, DOMAIN, PLATFORMS, CONF_IP_ADDRESS
 from .coordinators import EufyTuyaDataUpdateCoordinator
@@ -25,6 +28,17 @@ SERVICE_DUMP_DPS = "dump_dps"
 SERVICE_WRITE_DPS = "write_dps"
 SERVICE_CLEAN_ROOMS = "clean_rooms"
 SERVICE_CANCEL_CLEAN = "cancel_clean"
+SERVICE_REFRESH_LOCAL_KEY = "refresh_local_key"
+
+# Zwischenspeicher im Konfigurationseintrag: Gruppe, Geraete-ID und Local Key aus der Cloud.
+# Der Local Key entsteht beim Koppeln und bleibt gueltig, bis der Roboter zurueckgesetzt oder
+# neu gekoppelt wird - die Cloud wird daher nur beim allerersten Start (ohne Speicher) und
+# ueber den Dienst refresh_local_key gebraucht.
+CONF_LOCAL_CACHE = "local_cache"
+# Ohne gespeicherten Schluessel fragt die Einrichtung die Cloud hoechstens alle 15 Minuten -
+# Home Assistant wiederholt "noch nicht bereit" sonst alle 80 Sekunden, und eufy sperrt
+# bei zu vielen Logins (HTTP 429) nur noch laenger.
+CLOUD_RETRY_MIN = timedelta(minutes=15)
 
 CLEAN_ROOMS_SCHEMA = vol.Schema(
     {
@@ -43,6 +57,41 @@ WRITE_DPS_SCHEMA = vol.Schema(
 )
 
 
+def _fetch_cloud_devices(username: str, password: str) -> list[dict]:
+    """Holt Gruppe, Geraete-ID und Local Key aller Geraete aus der eufy-/Tuya-Cloud (blockierend)."""
+    client = EufyHomeSession(username, password)
+    user_info = client.get_user_info()
+    tuya_session = TuyaAPISession(
+        username=f'eh-{user_info["id"]}', country_code=user_info["phone_code"]
+    )
+    devices = []
+    for home in tuya_session.list_homes():
+        for device in tuya_session.list_devices(home["groupId"]):
+            devices.append(
+                {
+                    "group_id": home["groupId"],
+                    "dev_id": device["devId"],
+                    "local_key": device["localKey"],
+                }
+            )
+    return devices
+
+
+@callback
+def _async_store_cache(hass: HomeAssistant, entry: ConfigEntry, devices: list[dict]) -> None:
+    """Geraeteschluessel im Konfigurationseintrag ablegen."""
+    hass.config_entries.async_update_entry(
+        entry,
+        data={
+            **entry.data,
+            CONF_LOCAL_CACHE: {
+                "devices": devices,
+                "updated": dt_util.now().isoformat(timespec="seconds"),
+            },
+        },
+    )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """
     Set up Eufy Vacuum entities from a config entry.
@@ -55,20 +104,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     password = entry.data[CONF_PASSWORD]
     manual_ip = entry.data.get(CONF_IP_ADDRESS, "").strip() # HIER NEU
 
-    client = EufyHomeSession(username, password)
+    cache = entry.data.get(CONF_LOCAL_CACHE) or {}
+    cloud_devices = cache.get("devices") or []
+    if cloud_devices:
+        logger.info(
+            "Nutze gespeicherte Geraeteschluessel (%s Geraet(e), Stand %s) - kein Cloud-Login noetig",
+            len(cloud_devices),
+            cache.get("updated", "?"),
+        )
+    else:
+        last_fail = hass.data.get(f"{DOMAIN}_cloud_last_fail")
+        if last_fail and dt_util.utcnow() - last_fail < CLOUD_RETRY_MIN:
+            naechster = dt_util.as_local(last_fail + CLOUD_RETRY_MIN).strftime("%H:%M")
+            raise ConfigEntryNotReady(
+                f"eufy-Cloud zuletzt nicht erreichbar - naechster Versuch ab {naechster}"
+            )
+        try:
+            cloud_devices = await hass.async_add_executor_job(
+                _fetch_cloud_devices, username, password
+            )
+        except Exception as err:
+            hass.data[f"{DOMAIN}_cloud_last_fail"] = dt_util.utcnow()
+            raise ConfigEntryNotReady(
+                f"eufy-/Tuya-Cloud nicht erreichbar, Home Assistant versucht es erneut: {err}"
+            ) from err
+        hass.data.pop(f"{DOMAIN}_cloud_last_fail", None)
+        if cloud_devices:
+            _async_store_cache(hass, entry, cloud_devices)
+            logger.info("Geraeteschluessel aus der Cloud geholt und gespeichert (%s Geraet(e))", len(cloud_devices))
 
     try:
-        user_info = await hass.async_add_executor_job(client.get_user_info)
-        logger.debug("Eufy user info: %s", user_info)
-        #
-        # eufy_device_list = await hass.async_add_executor_job(client.get_devices)
-        # logger.debug("Eufy device list: %s", eufy_device_list)
-
-        tuya_session = TuyaAPISession(username=f'eh-{user_info["id"]}', country_code=user_info["phone_code"])
-
-        homes = await hass.async_add_executor_job(tuya_session.list_homes)
-        logger.debug("Tuya homes: %s", homes)
-
         hass.data[DOMAIN][entry.entry_id].setdefault(CONF_DISCOVERED_DEVICES, {})
 
         # HIER NEU: Wir machen den Scan nur noch, wenn keine IP angegeben wurde
@@ -79,67 +144,63 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         else:
             logger.debug("Manual IP provided: %s. Skipping UDP discovery.", manual_ip)
 
-        for home in homes:
-            devices_for_home = await hass.async_add_executor_job(tuya_session.list_devices, home["groupId"])
+        for device in cloud_devices:
+            group_id = device["group_id"]
+            device_id = device["dev_id"]
+            local_key = device["local_key"]
 
-            for device in devices_for_home:
-                logger.debug("Got Tuya device in home group %s: %s", home["groupId"], device)
+            device_ip = None
 
-                device_id = device["devId"]
-                local_key = device["localKey"]
-                
-                device_ip = None
+            # HIER NEU: Weiche für IP-Zuweisung
+            if manual_ip:
+                device_ip = manual_ip
+                logger.debug("Using manually configured IP %s for device ID %s", device_ip, device_id)
+            else:
+                logger.debug("Looking for device_id '%s' in detected devices", device_id)
+                discovered_device = detected_devices.pop(device_id, None)
+                if discovered_device:
+                    device_ip = discovered_device["ip"]
+                    logger.debug("Found matching discovered device at %s for device ID %s", device_ip, device_id)
 
-                # HIER NEU: Weiche für IP-Zuweisung
-                if manual_ip:
-                    device_ip = manual_ip
-                    logger.debug("Using manually configured IP %s for device ID %s", device_ip, device_id)
-                else:
-                    logger.debug("Looking for device_id '%s' in detected devices", device_id)
-                    discovered_device = detected_devices.pop(device_id, None)
-                    if discovered_device:
-                        device_ip = discovered_device["ip"]
-                        logger.debug("Found matching discovered device at %s for device ID %s", device_ip, device_id)
+            if device_ip:
+                hass_entity_id = f'{group_id}-{device_id}'
 
-                if device_ip:
-                    hass_entity_id = f'{home["groupId"]}-{device["devId"]}'
+                coordinator = EufyTuyaDataUpdateCoordinator(
+                    hass,
+                    logger=logger,
+                    name=DOMAIN,
+                    update_interval=timedelta(seconds=30),
+                    host=device_ip,
+                    device_id=device_id,
+                    local_key=local_key,
+                )
 
-                    coordinator = EufyTuyaDataUpdateCoordinator(
-                        hass,
-                        logger=logger,
-                        name=DOMAIN,
-                        update_interval=timedelta(seconds=30),
-                        host=device_ip,
-                        device_id=device_id,
-                        local_key=local_key,
-                    )
-
-                    # Try to get initial data, but don't fail if it doesn't work
-                    try:
-                        await coordinator.async_config_entry_first_refresh()
-                    except Exception as e:
-                        logger.warning(
-                            "Could not get initial data for device %s at %s: %s",
-                            device_id,
-                            device_ip,
-                            e,
-                        )
-                        # Still add the device, it might come online later
-
-                    hass.data[DOMAIN][entry.entry_id][CONF_DISCOVERED_DEVICES][hass_entity_id] = {
-                        CONF_COORDINATOR: coordinator
-                    }
-                else:
+                # Try to get initial data, but don't fail if it doesn't work
+                try:
+                    await coordinator.async_config_entry_first_refresh()
+                except Exception as e:
                     logger.warning(
-                        "Could not find device %s on the local network. "
-                        "Available devices: %s. Device may be offline or on a different network.",
+                        "Could not get initial data for device %s at %s: %s",
                         device_id,
-                        list(detected_devices.keys()) if detected_devices else "none",
+                        device_ip,
+                        e,
                     )
+                    # Still add the device, it might come online later
+
+                hass.data[DOMAIN][entry.entry_id][CONF_DISCOVERED_DEVICES][hass_entity_id] = {
+                    CONF_COORDINATOR: coordinator
+                }
+            else:
+                logger.warning(
+                    "Could not find device %s on the local network. "
+                    "Available devices: %s. Device may be offline or on a different network.",
+                    device_id,
+                    list(detected_devices.keys()) if detected_devices else "none",
+                )
 
     except Exception:
         # TODO: raise proper exception
-        logger.exception("Exception when trying to get initial user info and devices")
+        logger.exception("Exception when trying to set up devices")
         raise
     else:
         # Forward the setup to each platform - use the correct method
@@ -315,6 +376,48 @@ def _async_register_services(hass: HomeAssistant) -> None:
         logger.info("cancel_clean: %s Aufgabe(n) geloescht", removed)
         hass.bus.async_fire(f"{DOMAIN}_clean_cancelled", {"removed": removed})
 
+    async def _handle_refresh_local_key(call: ServiceCall) -> None:
+        """Local Key neu aus der Cloud holen (nach neuem Koppeln) und die Integration neu laden.
+
+        Klappt der Abruf nicht, bleibt der gespeicherte Schluessel unangetastet.
+        """
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            try:
+                devices = await hass.async_add_executor_job(
+                    _fetch_cloud_devices, entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD]
+                )
+            except Exception as err:
+                logger.exception("refresh_local_key: Cloud-Abruf fehlgeschlagen - gespeicherter Schluessel bleibt")
+                persistent_notification.async_create(
+                    hass,
+                    f"Der Schluessel konnte nicht aus der Cloud geholt werden: {err}\n\n"
+                    "Der gespeicherte Schluessel bleibt unveraendert.",
+                    title="eufy S1 Pro: Schluessel nicht aktualisiert",
+                    notification_id="eufy_s1_pro_refresh_key",
+                )
+                continue
+            if not devices:
+                logger.warning("refresh_local_key: Cloud lieferte keine Geraete - gespeicherter Schluessel bleibt")
+                continue
+            old = {
+                d.get("dev_id"): d.get("local_key")
+                for d in (entry.data.get(CONF_LOCAL_CACHE) or {}).get("devices", [])
+            }
+            changed = len(old) != len(devices) or any(
+                old.get(d["dev_id"]) != d["local_key"] for d in devices
+            )
+            _async_store_cache(hass, entry, devices)
+            persistent_notification.async_create(
+                hass,
+                "Neuer Schluessel gespeichert, die Integration wird neu geladen."
+                if changed
+                else "Der Schluessel ist unveraendert, die Integration wird neu geladen.",
+                title="eufy S1 Pro: Schluessel aus der Cloud geholt",
+                notification_id="eufy_s1_pro_refresh_key",
+            )
+            logger.info("refresh_local_key: Schluessel %s", "geaendert" if changed else "unveraendert")
+            hass.config_entries.async_schedule_reload(entry.entry_id)
+
     hass.services.async_register(DOMAIN, SERVICE_DUMP_DPS, _handle_dump_dps)
     hass.services.async_register(
         DOMAIN, SERVICE_WRITE_DPS, _handle_write_dps, schema=WRITE_DPS_SCHEMA
@@ -323,6 +426,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
         DOMAIN, SERVICE_CLEAN_ROOMS, _handle_clean_rooms, schema=CLEAN_ROOMS_SCHEMA
     )
     hass.services.async_register(DOMAIN, SERVICE_CANCEL_CLEAN, _handle_cancel_clean)
+    hass.services.async_register(DOMAIN, SERVICE_REFRESH_LOCAL_KEY, _handle_refresh_local_key)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
