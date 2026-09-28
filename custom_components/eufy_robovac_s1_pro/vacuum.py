@@ -60,6 +60,87 @@ class RobovacState(Enum):
     UNKNOWN = "unknown"
 
 
+def _pb_varint(buf: bytes, i: int) -> tuple[int, int]:
+    """Liest ein Protobuf-Varint ab Position i (Wert, neue Position)."""
+    shift = 0
+    result = 0
+    while True:
+        b = buf[i]
+        i += 1
+        result |= (b & 0x7F) << shift
+        if not b & 0x80:
+            return result, i
+        shift += 7
+        if shift > 63:
+            raise ValueError("varint too long")
+
+
+def _pb_fields(buf: bytes) -> dict[int, list]:
+    """Zerlegt eine Protobuf-Nachricht in {Feldnummer: [Werte]} (Varint als int, LEN als bytes)."""
+    fields: dict[int, list] = {}
+    i = 0
+    while i < len(buf):
+        key, i = _pb_varint(buf, i)
+        num, wire = key >> 3, key & 0x07
+        if wire == 0:
+            val, i = _pb_varint(buf, i)
+        elif wire == 2:
+            ln, i = _pb_varint(buf, i)
+            if i + ln > len(buf):
+                raise ValueError("length out of range")
+            val = bytes(buf[i:i + ln])
+            i += ln
+        elif wire == 5:
+            val = bytes(buf[i:i + 4])
+            i += 4
+        elif wire == 1:
+            val = bytes(buf[i:i + 8])
+            i += 8
+        else:
+            raise ValueError(f"unsupported wire type {wire}")
+        fields.setdefault(num, []).append(val)
+    return fields
+
+
+def _decode_dps153_room_mode(decoded: bytes) -> "tuple[RobovacState, str] | None":
+    """Status bei Raum-/Zonenreinigung (Modus-Feld != 0), z. B. geplante Raumauftraege.
+
+    DPS 153 ist eine laengenpraefixierte Protobuf-Nachricht: Feld 1 = Modus, Feld 2 = Zustand
+    (5 reinigt, 7 faehrt heim, 9 Stationsarbeit), Feld 6 = laufender Auftrag (Feld 1 = 1: pausiert),
+    Feld 7 = Moppwaesche, Feld 31 = Absaugen. Der aeltere Byte-Mustervergleich kennt nur Modus 0
+    ("0a 00") und meldete Raumauftraege deshalb faelschlich als DOCKED.
+    Gibt None zurueck, wenn es kein Raum-Modus ist - dann entscheidet der bisherige Vergleich.
+    """
+    try:
+        length, start = _pb_varint(decoded, 0)
+        f = _pb_fields(decoded[start:start + length])
+        mode_msg = f.get(1, [b""])[0]
+        if not isinstance(mode_msg, bytes) or not mode_msg:
+            return None
+        if not _pb_fields(mode_msg).get(1, [0])[0]:
+            return None
+        state = f.get(2, [0])[0]
+        task = f.get(6, [None])[0]
+        task_f = _pb_fields(task) if task else {}
+        if state == 5:
+            if task_f.get(1, [0])[0] == 1:
+                return RobovacState.PAUSED, "paused"
+            return RobovacState.CLEANING, "cleaning"
+        if state == 7:
+            return RobovacState.RETURNING, "returning"
+        if state == 9:
+            if 31 in f:
+                return RobovacState.DOCKED, "dust_collecting"
+            if 7 in f:
+                return RobovacState.DOCKED, "mop_washing"
+            if task is not None:
+                return RobovacState.DOCKED, "water_refilling"
+            return RobovacState.DOCKED, "mop_drying" if 3 in f else "mop_operations"
+        return None
+    except (IndexError, ValueError, TypeError):
+        return None
+
+
 def decode_dps153_to_state(dps153_value: str) -> tuple[RobovacState, str]:
     """
     dps153ã®å€¤ã‹ã‚‰ãƒ­ãƒœãƒƒãƒˆæŽƒé™¤æ©Ÿã®çŠ¶æ…‹ã¨ã‚µãƒ–ã‚¹ãƒ†ãƒ¼ã‚¿ã‚¹ã‚’åˆ¤å®š
@@ -85,6 +166,11 @@ def decode_dps153_to_state(dps153_value: str) -> tuple[RobovacState, str]:
             decoded = base64.b64decode(dps153_value)
         else:
             decoded = dps153_value
+
+        # Raum-/Zonenauftraege (Modus != 0) per Protobuf auswerten
+        room_mode = _decode_dps153_room_mode(decoded)
+        if room_mode is not None:
+            return room_mode
         
         # æœ€ä½Žé™ã®é•·ã•ãƒã‚§ãƒƒã‚¯
         if len(decoded) < 3:
