@@ -9,8 +9,8 @@ class CoordinatorTuyaDeviceUniqueIDMixin:
         return DeviceInfo(
             identifiers={(DOMAIN, self.coordinator.tuya_client.device_id)},
             manufacturer="Eufy",
-            # points to parent Eufy Vacuum device
-            via_device=(DOMAIN, self.coordinator.tuya_client.device_id),
+            # Kein via_device mehr: Es zeigte auf dasselbe Geraet (Selbstbezug, ohne Nutzen)
+            # und ist seit HA 2026.9 abgekuendigt (entfaellt mit 2027.8).
         )
 
     @property
